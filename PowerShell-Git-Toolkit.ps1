@@ -15,7 +15,7 @@ $GitFunctionDescriptions = @{
 
     # --- Repo Initialization / Publishing ---
     "gitInitPush"             = "Initialize new repo, first commit, set origin, push to GitHub"
-    "gitPublishExisting"      = "Publish an already-initialized local repo to GitHub"
+    "gitPushExistingRepo"     = "Publish an already-initialized local repo to GitHub"
 
     # --- Cloning & Remote Setup ---
     "gitClone"                = "Clone a remote repository"
@@ -65,6 +65,7 @@ $GitFunctionDescriptions = @{
 
     # --- Undo & Recovery ---
     "gitUndoSoft"             = "Undo last commit (keep changes)"
+    "gitUndoSoftRemote"       = "Undo last commit safely from remote (keep changes)"
     "gitUndoHard"             = "Undo last commit (delete changes)"
     "gitReflog"               = "Show reflog"
     "gitRestoreFromReflog"    = "Restore commit from reflog"
@@ -97,7 +98,7 @@ function gitHelp {
     "gitInitPush",
 
     "# Existing Project --> GitHub",
-    "gitPublishExisting",
+    "gitPushExistingRepo",
 
     "# Clone & Remote Setup",
     "gitClone",
@@ -147,6 +148,7 @@ function gitHelp {
 
     "# Undo & Recovery",
     "gitUndoSoft",
+    "gitUndoSoftRemote",
     "gitUndoHard",
     "gitReflog",
     "gitRestoreFromReflog",
@@ -240,82 +242,84 @@ function gitInitPush {
 # Existing Project --> GitHub
 # ==================================================
 
-function gitPublishExisting {
-    Write-Host "`nPublishing existing repository to GitHub..." -ForegroundColor Cyan
+function gitPushExistingRepo {
+    Write-Host "`nSafely pushing existing repository..." -ForegroundColor Cyan
 
-    # If no Git repo exists, initialize it first
-    if (-not (Test-Path ".git")) {
-        Write-Host "No Git repository found. Initializing a new repository..." -ForegroundColor Yellow
-        git init
-        Write-Host "Git repository initialized." -ForegroundColor Green
-
-        # Add files if any
-        $status = git status --porcelain
-        if ($status) {
-            Write-Host "`n Uncommitted changes detected:" -ForegroundColor Yellow
-            git status -s
-            $commitNow = Read-Host "Do you want to commit them before pushing? (y/n)"
-            if ($commitNow -eq "y") {
-                $msg = Read-Host "Enter commit message"
-                if ([string]::IsNullOrWhiteSpace($msg)) { $msg = "Initial commit" }
-                git add .
-                git commit -m "$msg"
-                Write-Host "Changes committed." -ForegroundColor Green
-            } else {
-                Write-Host "Proceeding without committing changes." -ForegroundColor Yellow
-            }
-        }
-    }
-
-    # If repo exists, check for uncommitted changes as before
-    else {
-        $status = git status --porcelain
-        if ($status) {
-            Write-Host "`n Uncommitted changes detected:" -ForegroundColor Yellow
-            git status -s
-            $commitNow = Read-Host "Do you want to commit them before pushing? (y/n)"
-            if ($commitNow -eq "y") {
-                $msg = Read-Host "Enter commit message"
-                if ([string]::IsNullOrWhiteSpace($msg)) { $msg = "Update files" }
-                git add .
-                git commit -m "$msg"
-                Write-Host "Changes committed." -ForegroundColor Green
-            } else {
-                Write-Host "Proceeding without committing changes." -ForegroundColor Yellow
-            }
-        } else {
-            Write-Host "No uncommitted changes detected." -ForegroundColor Green
-        }
-    }
-
-    # Get GitHub repository URL
+    # Ask for remote URL
     $repoUrl = Read-Host "Enter GitHub repository URL (HTTPS)"
     if ([string]::IsNullOrWhiteSpace($repoUrl)) {
         Write-Host "Error: Repository URL cannot be empty." -ForegroundColor Red
         return
     }
 
-    # Check if remote 'origin' exists
-    $existing = git remote | Select-String "^origin$"
-    if ($existing) {
-        Write-Host "Remote 'origin' already exists." -ForegroundColor Yellow
-        $confirm = Read-Host "Replace it? (y/n)"
-        if ($confirm -ne "y") { return }
-        git remote remove origin
-        Write-Host "Old origin removed." -ForegroundColor Green
+    # Show current origin if exists
+    $currentOrigin = git remote get-url origin 2>$null
+    if ($currentOrigin) {
+        Write-Host "`nCurrent origin:" -ForegroundColor Yellow
+        Write-Host "  $currentOrigin"
+        if ($currentOrigin -ne $repoUrl) {
+            Write-Host "Updating origin to the new URL..." -ForegroundColor Yellow
+            git remote set-url origin $repoUrl
+        } else {
+            Write-Host "Origin already matches target." -ForegroundColor Green
+        }
+    } else {
+        git remote add origin $repoUrl
+        Write-Host "Origin set to $repoUrl" -ForegroundColor Green
     }
 
-    # Add remote
-    git remote add origin $repoUrl
-    Write-Host "Remote 'origin' configured to $repoUrl" -ForegroundColor Green
+    # Detect current branch
+    $branch = git branch --show-current
+    if (-not $branch) {
+        Write-Host "Cannot detect current branch." -ForegroundColor Red
+        return
+    }
+    Write-Host "`nCurrent branch: $branch" -ForegroundColor Cyan
 
-    # Ensure main branch
-    git branch -M main
-    Write-Host "Branch set to 'main'" -ForegroundColor Green
+    # Fetch remote state
+    Write-Host "Fetching remote state..." -ForegroundColor Cyan
+    git fetch origin
 
-    # Push to GitHub
-    git push -u origin main
-    Write-Host "`nRepository successfully published!" -ForegroundColor Green
+    # Check if remote branch exists
+    git rev-parse --verify "origin/$branch" 2>$null
+    $remoteExists = ($LASTEXITCODE -eq 0)
+
+    if (-not $remoteExists) {
+        Write-Host "`nRemote branch does not exist (empty or new repo)." -ForegroundColor Green
+        Write-Host "Pushing branch '$branch'..." -ForegroundColor Cyan
+        git push -u origin $branch
+        Write-Host "Push successful!" -ForegroundColor Green
+        return
+    }
+
+    # Remote branch exists → check ahead/behind
+    $behind  = git rev-list HEAD..origin/$branch --count
+    $ahead   = git rev-list origin/$branch..HEAD --count
+
+    if ($behind -gt 0) {
+        Write-Host "`nRemote has $behind commit(s) ahead of your local branch." -ForegroundColor Yellow
+        Write-Host "Pulling remote changes..." -ForegroundColor Cyan
+        git pull --rebase origin $branch
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Pull failed. Resolve conflicts manually and try again." -ForegroundColor Red
+            return
+        }
+    }
+
+    if ($ahead -eq 0) {
+        Write-Host "`nNothing to push. Branch is up-to-date with remote." -ForegroundColor Green
+        return
+    }
+
+    # Push local commits
+    Write-Host "`nPushing $ahead commit(s) to '$branch'..." -ForegroundColor Cyan
+    git push origin $branch
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "`nPush successful!" -ForegroundColor Green
+    } else {
+        Write-Host "`nPush failed. Check your Git setup and try again." -ForegroundColor Red
+    }
 }
 
 
@@ -750,6 +754,42 @@ function gitPushStash {
 
 function gitUndoSoft { git reset --soft HEAD~1 }
 
+function gitUndoSoftRemote {
+
+    $branch = git branch --show-current
+    if (-not $branch) {
+        Write-Host "Cannot detect current branch." -ForegroundColor Red
+        return
+    }
+
+    Write-Host "`nThis will REMOVE the last commit from:" -ForegroundColor Yellow
+    Write-Host "• Local branch  : $branch" -ForegroundColor Cyan
+    Write-Host "• Remote branch: origin/$branch" -ForegroundColor Cyan
+    Write-Host "• Code will be KEPT (soft reset)" -ForegroundColor Green
+
+    $confirm = Read-Host "`nAre you sure you want to continue? (y/n)"
+    if ($confirm -ne "y") {
+        Write-Host "Operation cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "`nUndoing last commit safely..." -ForegroundColor Yellow
+
+    git reset --soft HEAD~1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Local reset failed." -ForegroundColor Red
+        return
+    }
+
+    git push origin $branch --force-with-lease
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Last commit removed from remote safely. Changes are preserved locally." -ForegroundColor Green
+    } else {
+        Write-Host "Remote push failed. Your local changes are still safe." -ForegroundColor Red
+    }
+}
+
+
 function gitUndoHard {
     Write-Host "This will permanently delete changes!" -ForegroundColor Red
     if ((Read-Host "Continue? (y/n)") -eq "y") { git reset --hard HEAD~1 }
@@ -883,3 +923,425 @@ function gitCurrentBranch { git branch --show-current }
 ####################################################
 #                 END — Git Toolkit                #
 ####################################################
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ---------------------------------------------
+# Android / RN Helper: Show Only Names or Full
+# ---------------------------------------------
+$AndroidRNFunctionDescriptions = @{
+    "connectMyPhone"          = "Connect your Android phone via ADB using your custom script"
+    "viewMyPhone"             = "Launch scrcpy to mirror your phone screen"
+    "cleanADB"                = "Restart ADB server and show connected devices"
+    "removeGhostDevices"      = "Detect and remove ghost/phantom ADB devices"
+    "startEmulator"           = "Start one Android emulator from a list"
+    "restartEmulator"         = "Kill all emulators, restart ADB, and reboot all AVDs (with spinner)"
+    "fixReactNativeProject"   = "Run custom RN project fix script"
+    "startMetro"              = "Restart Metro Bundler on port 8081 (fix port issues)"
+    "runRNAppEmu"             = "Start emulator if needed and run RN Android app"
+    "cleanAndroid"            = "Run Gradle clean inside /android"
+    "startBackend"            = "Start backend server using npm run dev"
+    "reactNative-RunAndroid"  = "Run React Native app on Android"
+    "reactNative-resetBuild"  = "Reset all builds + reinstall dependencies"
+}
+
+function androidHelp {
+    param([string]$Mode = "full")
+
+    Write-Host "`nAndroid + React Native Helper Functions:`n" -ForegroundColor Cyan
+
+    $sorted = $AndroidRNFunctionDescriptions.Keys | Sort-Object
+
+    if ($Mode -eq "names") {
+        foreach ($func in $sorted) {
+            Write-Host $func -ForegroundColor Green
+        }
+        return
+    }
+
+    # DEFAULT → full descriptions
+    foreach ($func in $sorted) {
+        $desc = $AndroidRNFunctionDescriptions[$func]
+        Write-Host ("{0,-30} : {1}" -f $func, $desc)
+    }
+}
+# ---------------------------------------------
+
+
+
+# Add NPM global binaries to PATH
+$env:Path += ";C:\Users\SiamAR\AppData\Roaming\npm"
+
+
+# Minimal profile: UTF‑8 + Oh My Posh (if installed) + Fastfetch with explicit config path
+try {
+    [Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    chcp 65001 > $null
+} catch {}
+
+Clear-Host
+
+
+# Force Fastfetch to use YOUR config every time (bypass path confusion)
+if (Get-Command fastfetch -ErrorAction SilentlyContinue) {
+    fastfetch -c "C:/Users/SiamAR/.config/fastfetch/config.jsonc"
+} 
+else {
+    Write-Host " Fastfetch not found in PATH." -ForegroundColor Yellow
+}
+
+
+#connectMyPhone
+function connectMyPhone {
+    $scriptPath = "C:\AndroidScripts\connectMyPhone.ps1"
+
+    if (-Not (Test-Path $scriptPath)) {
+        Write-Host "Script not found at $scriptPath" -ForegroundColor Red
+        return
+    }
+
+    # Run the script in the current session
+    . $scriptPath
+}
+
+
+#viewMyPhone
+function viewMyPhone {
+    # Path to your custom scrcpy launcher batch
+    $scrcpyBat = "C:\scrcpy-win64-v3.3.3\scrcpy-win64-v3.3.3\scrcpyCustom.bat"
+
+    if (-Not (Test-Path $scrcpyBat)) {
+        Write-Host "scrcpy launcher not found at $scrcpyBat" -ForegroundColor Red
+        return
+    }
+
+    # Launch it in a separate window, like your original batch
+    Start-Process -FilePath $scrcpyBat
+}
+
+
+# --- Fix ADB Connection ---
+function cleanADB {
+    Write-Host "`n Restarting ADB server..." -ForegroundColor Cyan
+    & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" kill-server
+    & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" start-server
+    Write-Host "`n Current connected devices:`n" -ForegroundColor Yellow
+    & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" devices
+    Write-Host "`n ADB restarted successfully.`n" -ForegroundColor Green
+}
+
+
+#removeGhostDevices
+function removeGhostDevices {
+    Write-Host ""
+    Write-Host "Checking for ghost ADB devices..."
+
+    $ghostList = adb devices | Select-String "_adb-tls-connect"
+
+    if (-not $ghostList) {
+        Write-Host "No ghost devices found."
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Ghost devices detected:"
+
+    foreach ($g in $ghostList) {
+        $id = $g.ToString().Split()[0]
+        Write-Host "Removing: $id"
+        adb disconnect $id | Out-Null
+    }
+
+    Write-Host ""
+    Write-Host "All ghost devices removed."
+}
+
+
+#startEmulator
+function startEmulator {
+    $emulatorPath = "C:\Users\SiamAR\AppData\Local\Android\Sdk\emulator\emulator.exe"
+
+    if (-not (Test-Path $emulatorPath)) {
+        Write-Host "Emulator not found at $emulatorPath" -ForegroundColor Red
+        return
+    }
+
+    # Get list of AVDs as array of strings
+    $avdList = @(& $emulatorPath -list-avds 2>$null)
+
+    if (-not $avdList -or $avdList.Count -eq 0) {
+        Write-Host "No Android Virtual Devices found. Create one in Android Studio → AVD Manager." -ForegroundColor Red
+        return
+    }
+
+    Write-Host "`nAvailable Emulators:`n"
+    for ($i = 0; $i -lt $avdList.Count; $i++) {
+        Write-Host "$($i + 1). $($avdList[$i].ToString().Trim())"
+    }
+
+    $choice = Read-Host "`nEnter number to start"
+
+    if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $avdList.Count) {
+        $selectedAvd = $avdList[[int]$choice - 1].ToString().Trim()
+        Write-Host "`nStarting emulator: $selectedAvd"
+        & $emulatorPath -avd $selectedAvd
+    } else {
+        Write-Host "Invalid selection." -ForegroundColor Yellow
+    }
+}
+
+
+#restartEmulator
+function restartEmulator {
+    Write-Host "======================================================" -ForegroundColor DarkCyan
+    Write-Host "            Restarting Android Emulators..." -ForegroundColor Cyan
+    Write-Host "======================================================" -ForegroundColor DarkCyan
+
+    # Step 1: Kill all running emulator processes
+    Write-Host "`nStopping any running emulator processes..." -ForegroundColor Yellow
+    "qemu-system-x86_64","qemu-system-aarch64" | ForEach-Object {
+        Get-Process -Name $_ -ErrorAction SilentlyContinue | Stop-Process -Force
+    }
+    Start-Sleep -Seconds 2
+
+    # Step 2: Restart ADB
+    Write-Host "`nRestarting ADB..." -ForegroundColor Yellow
+    adb kill-server
+    adb start-server
+    Start-Sleep -Seconds 2
+
+    # Step 3: Get all available AVDs
+    $emulatorPath = "C:\Users\SiamAR\AppData\Local\Android\Sdk\emulator\emulator.exe"
+    $avdList = @(& $emulatorPath -list-avds 2>$null) | ForEach-Object { $_.Trim() }
+
+    if (-not $avdList -or $avdList.Count -eq 0) {
+        Write-Host "No AVDs found. Please create one in Android Studio → AVD Manager." -ForegroundColor Red
+        return
+    }
+
+    Write-Host "`nAvailable AVDs:" -ForegroundColor Cyan
+    $avdList | ForEach-Object { Write-Host "  - $_" -ForegroundColor Cyan }
+
+    # Spinner characters
+    $spinnerChars = @('|','/','-','\')
+
+    # Step 4: Start each selected AVD
+    $startedEmulators = @()  # Track which emulators actually started
+
+    foreach ($avd in $avdList) {
+        Write-Host "`n------------------------------------------------------" -ForegroundColor DarkCyan
+        Write-Host "Ready to start emulator '$avd'." -ForegroundColor Cyan
+        Write-Host "Please follow the prompt to continue...`n" -ForegroundColor DarkCyan
+        Write-Host "------------------------------------------------------`n" -ForegroundColor DarkCyan
+
+        # Start the emulator with no GUI prompt
+        Start-Process -FilePath $emulatorPath -ArgumentList "-avd $avd" -NoNewWindow
+
+        # Step 5: Wait until emulator is online
+        Write-Host "Waiting for $avd to fully boot..." -ForegroundColor Yellow -NoNewline
+        $timeout = 600      # maximum wait time in seconds
+        $elapsed = 0
+        $interval = 2
+        $spinnerIndex = 0
+        $isOnline = $false
+
+        while ($elapsed -lt $timeout) {
+            $devices = adb devices | ForEach-Object { ($_ -split "`t")[0] } | Where-Object { $_ -match "^emulator-\d+" }
+
+            foreach ($dev in $devices) {
+                try {
+                    $state = adb -s $dev get-state 2>$null
+                    if ($state -eq "device") {
+                        $isOnline = $true
+                        break
+                    }
+                } catch {}
+            }
+
+            if ($isOnline) {
+                Write-Host "`r$avd is fully online! " -ForegroundColor Green
+                $startedEmulators += $avd
+                break
+            }
+
+            # Display spinner
+            Write-Host -NoNewline "`rBooting $avd... $($spinnerChars[$spinnerIndex])" -ForegroundColor Blue
+            $spinnerIndex = ($spinnerIndex + 1) % $spinnerChars.Count
+
+
+            Start-Sleep -Seconds $interval
+            $elapsed += $interval
+        }
+
+        if (-not $isOnline) {
+            Write-Host "`r$avd did not boot in time." -ForegroundColor Red
+        }
+
+        Write-Host "`n------------------------------------------------------`n" -ForegroundColor DarkCyan
+    }
+
+    # Step 6: Final message with actually started emulators
+    Write-Host "======================================================" -ForegroundColor DarkCyan
+    if ($startedEmulators.Count -gt 0) {
+        Write-Host "Started emulator(s): $($startedEmulators -join ', ')" -ForegroundColor Cyan
+    } else {
+        Write-Host "No emulators were started." -ForegroundColor Red
+    }
+    Write-Host "======================================================" -ForegroundColor DarkCyan
+}
+
+
+# Function 1: Clean Android Project
+function cleanAndroid {
+    Write-Host "Cleaning Android Project..."
+    Set-Location -Path "android"
+    ./gradlew clean
+    Set-Location -Path ..
+}
+
+
+# Function 2: Start Backend Development Server
+function startBackend {
+    Write-Host "Starting Backend Server..."
+    Set-Location -Path ".\backend"
+    npm run dev
+    Set-Location -Path ..
+}
+
+
+# Function 3: Run React Native Android App
+function reactNative-RunAndroid {
+    Write-Host "Running React Native Android..."
+    yarn react-native run-android --active-arch-only
+}
+
+
+function reactNative-resetBuild {
+    Write-Host "Stopping Node processes..." -ForegroundColor Yellow
+    Stop-Process -Name node -ErrorAction SilentlyContinue
+
+    Write-Host "Cleaning project directories..." -ForegroundColor Yellow
+    rm -Recurse -Force android\.gradle 2>$null
+    rm -Recurse -Force android\app\.cxx 2>$null
+    rm -Recurse -Force android\build 2>$null
+    rm -Recurse -Force android\app\build 2>$null
+    rm -Recurse -Force android\app\build\generated\autolinking 2>$null
+    rm -Recurse -Force node_modules 2>$null
+    rm -Force yarn.lock 2>$null
+
+    Write-Host "Clearing NPM cache..." -ForegroundColor Yellow
+    npm cache clean --force
+
+    Write-Host "Installing dependencies with Yarn..." -ForegroundColor Yellow
+    yarn install
+
+    Write-Host "Rebuilding Gradle..." -ForegroundColor Yellow
+    Push-Location android
+    .\gradlew clean
+    Pop-Location
+
+}
+
+
+#fixReactNativeProject
+function fixReactNativeProject { param($path) & "C:\AndroidScripts\fixReactNativeProject.ps1" -projectPath $path }
+
+# Now try from anywhere:
+
+# fixReactNativeProject "P:\Code_Vault\React_Native\testProject01"
+
+# or, if you’re already inside the project folder:
+
+# fixReactNativeProject .
+
+
+
+#fixMetro
+function startMetro {
+    Write-Host "Killing all Node/Metro processes..." -ForegroundColor Yellow
+    taskkill /F /IM node.exe /T 2>$null
+    Write-Host "Starting Metro Bundler on port 8081 (cache cleared)..." -ForegroundColor Green
+    npx react-native start --port 8081 --reset-cache
+}
+
+
+#runRNAppEmu
+function runRNAppEmu {
+    param(
+        [string]$ProjectPath = (Get-Location)
+    )
+
+    # Go to project directory
+    Set-Location $ProjectPath
+
+    # Check if any emulator is running
+    $emulator = adb devices | Where-Object { $_ -match 'emulator' -and $_ -notmatch 'offline|unauthorized' }
+
+    if (-not $emulator) {
+        Write-Host "No emulator running. Starting emulator..."
+        
+        # List available emulators
+        $emulators = & "$env:ANDROID_SDK_ROOT\emulator\emulator.exe" -list-avds
+        $i = 1
+        $emulators | ForEach-Object { Write-Host "$i. $_"; $i++ }
+        
+        $choice = Read-Host "Enter number to start"
+        $selectedEmu = $emulators[$choice - 1]
+
+        # Start emulator in background
+        Start-Process -FilePath "$env:ANDROID_SDK_ROOT\emulator\emulator.exe" -ArgumentList "-avd $selectedEmu" -NoNewWindow
+        Write-Host "Starting emulator: $selectedEmu"
+
+        # Wait until device is online
+        do {
+            Start-Sleep -Seconds 2
+            $emulator = adb devices | Where-Object { $_ -match 'emulator' -and $_ -notmatch 'offline|unauthorized' }
+        } until ($emulator)
+    } else {
+        Write-Host "Emulator already running."
+    }
+
+    # Run React Native app
+    Write-Host "Running React Native app..."
+    npx react-native run-android
+}
+
+
+
+
+
+function enter-adminShell {
+    [CmdletBinding()]
+    param()
+
+    Start-Process powershell -Verb RunAs
+}
+
+
+
+# End of PowerShell Profile

@@ -222,21 +222,38 @@ function gitSetupUser {
 # ==================================================
 
 function gitInitPush {
+    param(
+        [string]$Message = "Initial commit"
+    )
+
     Write-Host "Initializing new Git repository..." -ForegroundColor Cyan
-    if (-not (Test-Path ".git")) { git init }
+
+    if (-not (Test-Path ".git")) {
+        git init
+    }
 
     git branch -M main
     git add .
-    git commit -m "Initial commit" --allow-empty
+
+    # Only commit if there are changes
+    if (git status --porcelain) {
+        git commit -m $Message
+    } else {
+        Write-Host "Nothing to commit. Creating empty commit..." -ForegroundColor Yellow
+        git commit -m $Message --allow-empty
+    }
 
     $repoUrl = Read-Host "Enter GitHub repository URL (HTTPS)"
-    if (git remote | Select-String "^origin$") { git remote remove origin }
+
+    if (git remote | Select-String "^origin$") {
+        git remote remove origin
+    }
 
     git remote add origin $repoUrl
     git push -u origin main
+
     Write-Host "Repository initialized & pushed." -ForegroundColor Green
 }
-
 
 # ==================================================
 # Existing Project --> GitHub
